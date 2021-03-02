@@ -71,9 +71,8 @@ struct _GstCvRemap {
     bool showUndistorted;
     float alpha;
 
-    // opaque string containing opencv calibration settings
-    gchar* map1path;
-    gchar* map2path;
+    // opaque string containing remap Mat file path
+    gchar* mapsPath;
 
     // state
     bool doRemap;
