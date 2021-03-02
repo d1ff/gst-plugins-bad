@@ -176,10 +176,12 @@ static void gst_cv_remap_init(GstCvRemap* undist)
     undist->doRemap = FALSE;
     undist->settingsChanged = FALSE;
 
-    undist->map1 = cv::Mat();
-    undist->map2 = cv::Mat();
+    undist->map1 = cv::UMat();
+    undist->map2 = cv::UMat();
 
     undist->mapsPath = NULL;
+    undist->pad_sink_height = 0;
+    undist->pad_sink_width = 0;
 
     gst_opencv_video_filter_set_in_place(
         GST_OPENCV_VIDEO_FILTER_CAST(undist), FALSE);
@@ -217,9 +219,9 @@ static void gst_cv_remap_set_property(
             undist->mapsPath = g_strdup(str);
         if (undist->mapsPath) {
             cv::FileStorage fs(undist->mapsPath, 0);
-            undist->map1 = fs["map_a"].mat();
+            fs["map_a"].mat().copyTo(undist->map1);
             GST_WARNING("READ MAP A");
-            undist->map2 = fs["map_b"].mat();
+            fs["map_b"].mat().copyTo(undist->map2);
             GST_WARNING("READ MAP B");
             fs.release();
         }
@@ -289,17 +291,18 @@ static void cv_remap_run(GstCvRemap* undist, cv::Mat img, cv::Mat outimg)
         /* TODO: validate mat's propely */
         undist->doRemap = !undist->map1.empty() && !undist->map2.empty();
     }
+    // cv::UMat uimg = img.getUMat(cv::ACCESS_READ),
+    // uout = outimg.getUMat(cv::ACCESS_WRITE);
 
     if (undist->showUndistorted && undist->doRemap) {
         /* do the undistort */
 
         // GST_WARNING("input img %d,%d; output img %d,%d", img.cols, img.rows,
         // outimg.cols, outimg.rows);
-        cv::Mat outRoi(outimg, cv::Range(0, undist->map1.rows),
-            cv::Range(0, undist->map1.cols));
-        cv::remap(img, outRoi, undist->map1, undist->map2, cv::INTER_LINEAR,
+        cv::remap(img, outimg, undist->map1, undist->map2, cv::INTER_NEAREST,
             cv::BORDER_TRANSPARENT);
 
+        // uout.copyTo(outimg);
     } else {
         /* FIXME should use pass through to avoid this copy when not
          * undistorting */
@@ -320,156 +323,85 @@ gboolean gst_cv_remap_plugin_init(GstPlugin* plugin)
     return gst_element_register(
         plugin, "cvremap", GST_RANK_NONE, GST_TYPE_CV_REMAP);
 }
-
-static inline gint gst_cv_remap_transform_dimension(gint val, gint delta)
+static void gst_cv_remap_calculate_dimensions(GstCvRemap* filter,
+    GstPadDirection direction, gint in_width, gint in_height, gint* out_width,
+    gint* out_height)
 {
-    gint64 new_val = (gint64)val - (gint64)delta;
+    GST_LOG_OBJECT(filter,
+        "Calculate dimensions, in_width: %" G_GINT32_FORMAT
+        " in_height: %" G_GINT32_FORMAT " pad sink width: %" G_GINT32_FORMAT
+        " pad sink height: %" G_GINT32_FORMAT " cols: %" G_GINT32_FORMAT
+        ", rows: %" G_GINT32_FORMAT ", direction: %d",
+        in_width, in_height, filter->pad_sink_width, filter->pad_sink_height,
+        filter->map1.cols, filter->map1.rows, direction);
 
-    new_val = CLAMP(new_val, 1, G_MAXINT);
+    if (direction == GST_PAD_SINK) {
+        *out_width = filter->map1.cols;
+        *out_height = filter->map1.rows;
 
-    return (gint)new_val;
-}
-
-static gboolean gst_cv_remap_transform_dimension_value(
-    const GValue* src_val, gint delta, GValue* dest_val)
-{
-    gboolean ret = TRUE;
-
-    g_value_init(dest_val, G_VALUE_TYPE(src_val));
-
-    if (G_VALUE_HOLDS_INT(src_val)) {
-        gint ival = g_value_get_int(src_val);
-
-        ival = gst_cv_remap_transform_dimension(ival, delta);
-        g_value_set_int(dest_val, ival);
-    } else if (GST_VALUE_HOLDS_INT_RANGE(src_val)) {
-        gint min = gst_value_get_int_range_min(src_val);
-        gint max = gst_value_get_int_range_max(src_val);
-
-        // min = #;gst_cv_remap_transform_dimension(min, delta);
-        max = gst_cv_remap_transform_dimension(max, delta);
-        if (min >= max) {
-            ret = FALSE;
-            g_value_unset(dest_val);
-        } else {
-            gst_value_set_int_range(dest_val, min, max);
-        }
-    } else if (GST_VALUE_HOLDS_LIST(src_val)) {
-        guint i;
-
-        for (i = 0; i < gst_value_list_get_size(src_val); ++i) {
-            const GValue* list_val;
-            GValue newval = {
-                0,
-            };
-
-            list_val = gst_value_list_get_value(src_val, i);
-            if (gst_cv_remap_transform_dimension_value(
-                    list_val, delta, &newval))
-                gst_value_list_append_value(dest_val, &newval);
-            g_value_unset(&newval);
-        }
-
-        if (gst_value_list_get_size(dest_val) == 0) {
-            g_value_unset(dest_val);
-            ret = FALSE;
-        }
+        filter->pad_sink_width = in_width;
+        filter->pad_sink_height = in_height;
     } else {
-        g_value_unset(dest_val);
-        ret = FALSE;
+        if (filter->pad_sink_width > 0) {
+            *out_width = filter->pad_sink_width;
+        } else {
+            *out_width = in_width;
+        }
+        if (filter->pad_sink_height > 0) {
+            *out_height = filter->pad_sink_height;
+        } else {
+            *out_height = in_height;
+        }
     }
 
-    return ret;
+    GST_LOG_OBJECT(filter,
+        "Calculated dimensions: width %" G_GINT32_FORMAT
+        " => %" G_GINT32_FORMAT ", height %" G_GINT32_FORMAT
+        " => %" G_GINT32_FORMAT " direction: %d",
+        in_width, *out_width, in_height, *out_height, direction);
 }
 
 static GstCaps* gst_cv_remap_transform_caps(GstBaseTransform* trans,
-    GstPadDirection direction, GstCaps* from, GstCaps* filter)
+    GstPadDirection direction, GstCaps* caps, GstCaps* filter_caps)
 {
     GstCvRemap* cvremap = GST_CV_REMAP(trans);
 
-    GstCaps *to, *ret;
-    GstCaps* templ;
-    GstStructure* structure;
-    GstPad* other;
-    to = gst_caps_new_empty();
+    GstCaps* ret;
+    gint width, height;
     guint i;
 
-    for (i = 0; i < gst_caps_get_size(from); ++i) {
-        structure = gst_structure_copy(gst_caps_get_structure(from, i));
-        if (!cvremap->map1.empty()) {
-            GValue w_val = {
-                0,
-            };
-            GValue h_val = {
-                0,
-            };
-            const GValue* v;
+    ret = gst_caps_copy(caps);
 
-            gint dw = 0;
-            gint dh = 0;
+    GST_OBJECT_LOCK(cvremap);
 
-            if (direction == GST_PAD_SINK) {
-                dw -= cvremap->map1.cols - 3072;
-                dh -= cvremap->map1.rows - 2048;
-            } else {
-                dw += cvremap->map1.cols + 3072;
-                dh += cvremap->map1.rows + 2048;
-            }
+    for (i = 0; i < gst_caps_get_size(ret); i++) {
+        GstStructure* structure = gst_caps_get_structure(ret, i);
 
-            v = gst_structure_get_value(structure, "width");
-            if (!gst_cv_remap_transform_dimension_value(v, dw, &w_val)) {
-                GST_WARNING_OBJECT(cvremap,
-                    "could not transform width value with dw=%d"
-                    ", caps structure=%" GST_PTR_FORMAT,
-                    dw, structure);
-                goto bail;
-            }
-            gst_structure_set_value(structure, "width", &w_val);
-
-            v = gst_structure_get_value(structure, "height");
-            if (!gst_cv_remap_transform_dimension_value(v, dh, &h_val)) {
-                g_value_unset(&w_val);
-                GST_WARNING_OBJECT(cvremap,
-                    "could not transform height value with dh=%d"
-                    ", caps structure=%" GST_PTR_FORMAT,
-                    dh, structure);
-                goto bail;
-            }
-            gst_structure_set_value(structure, "height", &h_val);
-            g_value_unset(&w_val);
-            g_value_unset(&h_val);
+        if (gst_structure_get_int(structure, "width", &width)
+            && gst_structure_get_int(structure, "height", &height)) {
+            gint out_width, out_height;
+            gst_cv_remap_calculate_dimensions(
+                cvremap, direction, width, height, &out_width, &out_height);
+            gst_structure_set(structure, "width", G_TYPE_INT, out_width,
+                "height", G_TYPE_INT, out_height, NULL);
         }
-        gst_caps_append_structure(to, structure);
     }
 
-    /* filter against set allowed caps on the pad */
-    other = (direction == GST_PAD_SINK) ? trans->srcpad : trans->sinkpad;
-    templ = gst_pad_get_pad_template_caps(other);
-    ret = gst_caps_intersect(to, templ);
-    gst_caps_unref(to);
-    gst_caps_unref(templ);
+    GST_OBJECT_UNLOCK(cvremap);
 
-    GST_WARNING_OBJECT(cvremap,
-        "direction %d, transformed %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT,
-        direction, from, ret);
-
-    if (ret && filter) {
+    if (filter_caps) {
         GstCaps* intersection;
 
-        GST_WARNING_OBJECT(
-            cvremap, "Using filter caps %" GST_PTR_FORMAT, filter);
-        intersection
-            = gst_caps_intersect_full(filter, ret, GST_CAPS_INTERSECT_FIRST);
+        GST_DEBUG_OBJECT(
+            cvremap, "Using filter caps %" GST_PTR_FORMAT, filter_caps);
+
+        intersection = gst_caps_intersect_full(
+            filter_caps, ret, GST_CAPS_INTERSECT_FIRST);
         gst_caps_unref(ret);
         ret = intersection;
-        GST_WARNING_OBJECT(cvremap, "Intersection %" GST_PTR_FORMAT, ret);
+
+        GST_DEBUG_OBJECT(cvremap, "Intersection %" GST_PTR_FORMAT, ret);
     }
 
     return ret;
-bail : {
-    gst_structure_free(structure);
-    gst_caps_unref(to);
-    to = gst_caps_new_empty();
-    return to;
-}
 }

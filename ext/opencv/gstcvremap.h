@@ -80,7 +80,9 @@ struct _GstCvRemap {
 
     // undistort
     cv::Size imageSize;
-    cv::Mat map1, map2;
+    cv::UMat map1, map2;
+
+    gint pad_sink_width, pad_sink_height;
 };
 
 struct _GstCvRemapClass {
