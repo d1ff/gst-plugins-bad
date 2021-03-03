@@ -299,7 +299,11 @@ static void cv_remap_run(GstCvRemap* undist, cv::Mat img, cv::Mat outimg)
 
         // GST_WARNING("input img %d,%d; output img %d,%d", img.cols, img.rows,
         // outimg.cols, outimg.rows);
-        cv::remap(img, outimg, undist->map1, undist->map2, cv::INTER_NEAREST,
+        cv::remap(img.getUMat(cv::ACCESS_READ
+                      | cv::ACCESS_FAST), // cv::USAGE_ALLOCATE_DEVICE_MEMORY),
+            outimg.getUMat(cv::ACCESS_WRITE),
+            // cv::USAGE_ALLOCATE_DEVICE_MEMORY),
+            undist->map1, undist->map2, cv::INTER_NEAREST,
             cv::BORDER_TRANSPARENT);
 
         // uout.copyTo(outimg);
